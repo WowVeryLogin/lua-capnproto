@@ -14,6 +14,7 @@ local typeof    = ffi.typeof
 local cast      = ffi.cast
 local ffistr    = ffi.string
 local copy      = ffi.copy
+local ffi_gc    = ffi.gc
 local ceil      = math.ceil
 local floor     = math.floor
 local type      = type
@@ -64,6 +65,47 @@ local pointer_map = {
     float32 = typeof("float *"),
     float64 = typeof("double *"),
 }
+
+local memory = {
+    data = {}
+}
+_M.memory = memory
+
+memory.set = function(p, size, cb)
+    memory.data[p] = size
+    return ffi_gc(p, function (p)
+        if not memory.data[p] then
+            cb(p)
+        end
+        memory.data[p] = nil
+    end)
+end
+
+memory.check = function(pdata, size)
+    local tkeys = {}
+    if not memory.data then
+        return
+    end
+    for k in pairs(memory.data) do
+        table.insert(tkeys, k)
+    end
+    table.sort(tkeys)
+
+    local p = ffi.cast("char*", pdata)
+    for _, k in pairs(tkeys) do
+        if p >= k then
+            if p + size <= k + memory.data[k] then
+                return
+            end
+        end
+        if p < k then
+            if memory.error_cb then
+                memory.error_cb(k, p, size)
+            end
+            return
+        end
+    end
+end
 
 --- Calculate offset within size
 -- @param bit_off       offset in bits
@@ -190,6 +232,7 @@ function _M.write_bit(p8, val, bit_off, default)
         val = bxor(val, default)
     end
     p8[0] = bor(p8[0], lshift(val, bit_off))
+    memory.check(p8, 1)
 end
 
 --- Write a number
@@ -206,6 +249,7 @@ function _M.write_num(p, val, field_type, default)
         end
     end
     p[0] = val
+    memory.check(p, 1)
 end
 
 --- Write a structure field
@@ -246,6 +290,7 @@ end
 function _M.write_text_data(buf, text, is_binary)
     local len = #text
     copy(buf, text, len)
+    memory.check(buf, len)
     if is_binary then
         return round8(len)
     else
@@ -309,6 +354,7 @@ function _M.write_composite_tag(p32, T, num)
     -- pointer offset (B) instead indicates the number of elements in the list
     p[0] = lshift(num, 2)
     p[1] = lshift(T.pointerCount, 16) + T.dataWordCount
+    memory.check(p32, 2)
 end
 
 function _M.read_struct_pointer(p)
@@ -323,6 +369,7 @@ function _M.write_structp(p32, T, data_off)
     p32 = cast(pint32, p32)
     p32[0] = lshift(data_off, 2)
     p32[1] = lshift(T.pointerCount, 16) + T.dataWordCount
+    memory.check(p32, 2)
 end
 
 function _M.write_structp_buf(p32, T, TSub, offset, data_off)
@@ -330,6 +377,7 @@ function _M.write_structp_buf(p32, T, TSub, offset, data_off)
     local base = T.dataWordCount * 2 + offset * 2
     p32[base] = lshift(data_off, 2)
     p32[base + 1] = lshift(TSub.pointerCount, 16) + TSub.dataWordCount
+    memory.check(p32 + base, 2)
 end
 
 
@@ -401,6 +449,7 @@ end
 function _M.write_listp(p32, size_type, num, data_off)
     p32[0] = lshift(data_off, 2) + 1
     p32[1] = lshift(num, 3) + size_type
+    memory.check(p32, 2)
 end
 
 function _M.write_listp_buf(p32, T, offset, size_type, num, data_off)
@@ -409,6 +458,7 @@ function _M.write_listp_buf(p32, T, offset, size_type, num, data_off)
 
     p32[base] = lshift(data_off, 2) + 1
     p32[base + 1] = lshift(num, 3) + size_type
+    memory.check(p32 + base, 2)
 end
 
 --- map size type to its size
@@ -476,7 +526,6 @@ function _M.write_list_data(p32, data, pos, elm_type, ...)
         end
     elseif elm_type == "struct" then
         local T = ...
-
         _M.write_composite_tag(p32 + pos / 4, T, len)
         pos = pos + 8
         local offset = pos

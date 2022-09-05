@@ -95,12 +95,14 @@ local read_listp_struct = capnp.read_listp_struct
 local read_list_data    = capnp.read_list_data
 local write_list        = capnp.write_list
 local write_list_data   = capnp.write_list_data
+local memory            = capnp.memory
 local ffi_new           = ffi.new
 local ffi_string        = ffi.string
 local ffi_cast          = ffi.cast
 local ffi_copy          = ffi.copy
 local ffi_fill          = ffi.fill
 local ffi_typeof        = ffi.typeof
+local ffi_gc            = ffi.gc
 local band, bor, bxor = bit.band, bit.bor, bit.bxor
 
 local pint8    = ffi_typeof("int8_t *")
@@ -129,13 +131,24 @@ end
 local str_buf
 local default_segment_size = 4096
 
+memory.error_cb = function(k, p, size)
+    if ngx then
+        ngx.log(ngx.ERR, "bad memory access ", k, p, size)
+    else
+        print(k, p, value)
+        assert(false)
+    end
+end
+
 local function get_str_buf(size)
     if size > default_segment_size then
-        return ffi_new("char[?]", size)
+        local p = ffi_new("char[?]", size)
+        return memory.set(p, size, function(p) ngx.log(ngx.ERR, "double free ", p) end)
     end
 
     if not str_buf then
         str_buf = ffi_new("char[?]", default_segment_size)
+        str_buf = memory.set(str_buf, default_segment_size, function(p) ngx.log(ngx.ERR, "double free ", p) end)
     end
     return str_buf
 end
@@ -532,11 +545,13 @@ function comp_serialize(res, name)
             p8 = get_str_buf(size)
         end
         ffi_fill(p8, size)
+        memory.check(p8, size)
         local p32 = ffi_cast(puint32, p8)
 
         -- Because needed size has been calculated, only 1 segment is needed
         p32[0] = 0
         p32[1] = (size - 8) / 8
+        memory.check(p32, 2)
 
         -- skip header
         write_structp(p32 + 2, _M.%s, 0)
@@ -658,6 +673,7 @@ function comp_flat_serialize(res, nodes, struct, fields, size, name)
             write_listp_buf(p32, _M.%s, %d, %d, len, data_off)
 
             ffi_copy(p32 + pos / 4, value)
+            memory.check(p32 + pos / 4, #value+1)
             pos = pos + round8(len)
         end]], name, off, name, off, 2))
 
@@ -674,6 +690,7 @@ function comp_flat_serialize(res, nodes, struct, fields, size, name)
 
             -- prevent copying trailing '\0'
             ffi_copy(p32 + pos / 4, value, len)
+            memory.check(p32 + pos / 4, len)
             pos = pos + round8(len)
         end]], name, off, name, off, 2))
 
